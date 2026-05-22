@@ -1,4 +1,4 @@
-# imapback
+# IMAPback
 
 Small Bun IMAP diagnostic and backup tool.
 
