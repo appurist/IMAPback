@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 import tls from "node:tls";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createWriteStream, existsSync } from "node:fs";
 import { join } from "node:path";
 
 function usage() {
   return [
-    "Usage: bun run index.js <hostname> [password] --user <username> [--port <port>] [--folders] [--counts] [--search <text>] [--list [folder]] [--date <range>] [--output <dir>]",
+    "Usage: bun run index.js <hostname> [password] --user <username> [--port <port>] [--folders] [--counts] [--search <text>] [--list [folder]] [--date <range>] [--output <dir>] [--restore <dir> --restore-folder <folder>] [--dry-run]",
     "",
     "Options:",
     "  config.cfg          Optional defaults file in the current directory",
@@ -20,6 +20,9 @@ function usage() {
     "  --list, -l          List Date, From, and Subject for messages in one matching folder",
     "  --date, -d <range>  Filter --list by Date header; use YYYYMMDD, YYYYMMDD-YYYYMMDD, YYYYMMDD-, or -YYYYMMDD",
     "  --output, -o <dir>  Save all folders and messages under this local directory",
+    "  --restore <dir>     Restore .eml files from this local directory",
+    "  --restore-folder <folder> Destination folder for restored messages",
+    "  --dry-run           Preview restore actions without creating folders or appending messages",
     "  --help              Show this help"
   ].join("\n");
 }
@@ -53,6 +56,9 @@ async function loadConfigDefaults(path) {
     date: config.date,
     search: config.search,
     output: config.output,
+    restore: config.restore,
+    restoreFolder: config.restoreFolder ?? config.restore_folder,
+    dryRun: config.dryRun ?? config.dry_run,
     user: config.user ?? config.username ?? null
   };
 }
@@ -71,6 +77,9 @@ async function parseArgs(argv) {
     date: defaults.date ?? null,
     search: defaults.search ?? null,
     output: defaults.output ?? null,
+    restore: defaults.restore ?? null,
+    restoreFolder: defaults.restoreFolder ?? null,
+    dryRun: defaults.dryRun ?? false,
     connectHost: defaults.connectHost ?? null,
     user: process.env.IMAPSAVE_USER ?? defaults.user ?? null
   };
@@ -124,6 +133,16 @@ async function parseArgs(argv) {
       options.output = argv[++index] ?? null;
     } else if (arg.startsWith("--output=")) {
       options.output = arg.slice("--output=".length);
+    } else if (arg === "--restore") {
+      options.restore = argv[++index] ?? null;
+    } else if (arg.startsWith("--restore=")) {
+      options.restore = arg.slice("--restore=".length);
+    } else if (arg === "--restore-folder") {
+      options.restoreFolder = argv[++index] ?? null;
+    } else if (arg.startsWith("--restore-folder=")) {
+      options.restoreFolder = arg.slice("--restore-folder=".length);
+    } else if (arg === "--dry-run") {
+      options.dryRun = true;
     } else if (arg.startsWith("--")) {
       throw new Error(`Unknown option: ${arg}`);
     } else {
@@ -135,6 +154,12 @@ async function parseArgs(argv) {
   options.password = positionals[1] ?? process.env.IMAPSAVE_PASSWORD ?? defaults.password ?? null;
   if (!Number.isInteger(options.port) || options.port <= 0 || options.port > 65535) {
     throw new Error("Invalid --port value");
+  }
+  if (options.restore && !options.restoreFolder) {
+    throw new Error("--restore-folder is required with --restore");
+  }
+  if (options.restoreFolder && !options.restore) {
+    throw new Error("--restore is required with --restore-folder");
   }
   options.dateFilter = parseDateFilter(options.date);
   return options;
@@ -469,6 +494,53 @@ function errorText(error) {
   return `${error?.message ?? error}`.replace(/\r?\n/g, " ");
 }
 
+function compareRestoreFiles(left, right) {
+  const leftName = left.name.toLowerCase();
+  const rightName = right.name.toLowerCase();
+  const leftUid = Number(leftName.match(/^(\d+)\.eml$/)?.[1]);
+  const rightUid = Number(rightName.match(/^(\d+)\.eml$/)?.[1]);
+  const leftHasUid = Number.isInteger(leftUid);
+  const rightHasUid = Number.isInteger(rightUid);
+  if (leftHasUid && rightHasUid && leftUid !== rightUid) {
+    return leftUid - rightUid;
+  }
+  if (leftHasUid !== rightHasUid) {
+    return leftHasUid ? -1 : 1;
+  }
+  return leftName.localeCompare(rightName);
+}
+
+async function collectRestoreFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".eml"))
+    .map((entry) => ({
+      name: entry.name,
+      path: join(directory, entry.name)
+    }))
+    .sort(compareRestoreFiles);
+}
+
+function parseMessageDate(message) {
+  const separator = message.indexOf("\r\n\r\n");
+  const fallbackSeparator = separator === -1 ? message.indexOf("\n\n") : separator;
+  const headerEnd = fallbackSeparator === -1 ? Math.min(message.length, 65536) : fallbackSeparator;
+  const headers = parseHeaders(message.subarray(0, headerEnd).toString("utf8"));
+  const value = Date.parse(decodeMimeWords(headers.get("date") ?? ""));
+  return Number.isFinite(value) ? new Date(value) : null;
+}
+
+function formatImapInternalDate(date) {
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const day = `${date.getUTCDate()}`.padStart(2, "0");
+  const month = months[date.getUTCMonth()];
+  const year = date.getUTCFullYear();
+  const hours = `${date.getUTCHours()}`.padStart(2, "0");
+  const minutes = `${date.getUTCMinutes()}`.padStart(2, "0");
+  const seconds = `${date.getUTCSeconds()}`.padStart(2, "0");
+  return `${day}-${month}-${year} ${hours}:${minutes}:${seconds} +0000`;
+}
+
 function taggedResponseOk(lines, tag) {
   const tagged = lines.find((line) => line.startsWith(`${tag} `));
   if (!new RegExp(`^${tag} OK\\b`, "i").test(tagged ?? "")) {
@@ -623,6 +695,26 @@ class ImapClient {
     return lines.filter((line) => !line.startsWith(`${tag} `));
   }
 
+  async literalCommand(command, literal) {
+    const tag = `A${`${this.tagCounter++}`.padStart(4, "0")}`;
+    this.socket.write(`${tag} ${command} {${literal.length}}\r\n`);
+    const continuation = await this.readLinesUntil((items) => {
+      const last = items.at(-1) ?? "";
+      return last.startsWith("+") || items.some((line) => line.startsWith(`${tag} `));
+    });
+    if (continuation.some((line) => line.startsWith(`${tag} `))) {
+      taggedResponseOk(continuation, tag);
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      this.socket.write(literal, (error) => error ? reject(error) : resolve());
+    });
+    await new Promise((resolve, reject) => {
+      this.socket.write("\r\n", (error) => error ? reject(error) : resolve());
+    });
+    taggedResponseOk(await this.readLinesUntil((lines) => lines.some((line) => line.startsWith(`${tag} `))), tag);
+  }
+
   async login(username, password) {
     await this.command(`LOGIN ${quoteImap(username)} ${quoteImap(password)}`);
   }
@@ -635,6 +727,15 @@ class ImapClient {
   async listSubscribedFolders() {
     const lines = await this.command('LSUB "" "*"');
     return lines.map(parseListLine).filter(Boolean);
+  }
+
+  async createFolder(folder) {
+    await this.command(`CREATE ${quoteImap(folder)}`);
+  }
+
+  async appendMessage(folder, message, internalDate) {
+    const datePart = internalDate ? ` "${formatImapInternalDate(internalDate)}"` : "";
+    await this.literalCommand(`APPEND ${quoteImap(folder)}${datePart}`, message);
   }
 
   async status(folder) {
@@ -767,6 +868,47 @@ async function backupFolder(client, root, folder) {
   console.log(formatBackupLine(folder.name, uids.length, saved, skipped, errors));
 }
 
+async function restoreMessages(client, sourceDirectory, destinationFolder, dryRun) {
+  const files = await collectRestoreFiles(sourceDirectory);
+  if (files.length === 0) {
+    console.log(`${dryRun ? "DRYRUN" : "RESTORE"}\t${sourceDirectory}\t0 messages\tNo .eml files found`);
+    return;
+  }
+
+  const folders = await client.listFolders();
+  const exists = folders.some((folder) => exactFolderMatches(folder, destinationFolder));
+  if (!exists) {
+    if (dryRun) {
+      console.log(`DRYRUN\tCREATE\t${destinationFolder}`);
+    } else {
+      await client.createFolder(destinationFolder);
+      console.log(`CREATE\t${destinationFolder}`);
+    }
+  }
+
+  let restored = 0;
+  for (const file of files) {
+    try {
+      const message = await readFile(file.path);
+      const internalDate = parseMessageDate(message);
+      if (dryRun) {
+        const dateText = internalDate ? formatImapInternalDate(internalDate) : "no Date header";
+        console.log(`DRYRUN\tAPPEND\t${destinationFolder}\t${file.path}\t${message.length} bytes\t${dateText}`);
+      } else {
+        await client.appendMessage(destinationFolder, message, internalDate);
+        restored += 1;
+        console.log(`RESTORE\t${destinationFolder}\t${file.path}\t${message.length} bytes`);
+      }
+    } catch (error) {
+      console.log(`ERROR\t${destinationFolder}\t${file.path}\t${errorText(error)}`);
+      throw error;
+    }
+  }
+
+  const action = dryRun ? "DRYRUN" : "RESTORE";
+  console.log(`${action}\t${destinationFolder}\t${files.length} messages${dryRun ? "" : `\t${restored} restored`}`);
+}
+
 async function listFolderMessages(client, folder, dateFilter) {
   let uids;
   try {
@@ -886,6 +1028,16 @@ async function main() {
           process.exitCode = 1;
           break;
         }
+      }
+    }
+
+    if (options.restore) {
+      console.log(`\nRestoring ${options.restore} to ${quoteDisplay(options.restoreFolder)}${options.dryRun ? " (dry run)" : ""}:`);
+      try {
+        await restoreMessages(client, options.restore, options.restoreFolder, options.dryRun);
+      } catch (error) {
+        console.log(`ERROR\t${options.restoreFolder}\tRestore stopped\t${errorText(error)}`);
+        process.exitCode = 1;
       }
     }
   } finally {

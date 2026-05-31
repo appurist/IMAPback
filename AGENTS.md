@@ -12,6 +12,7 @@ Repository-root `.cfg` files such as `jon.cfg` are local configuration examples 
 - `bun run index.js --help`: print CLI usage and verify the program starts.
 - `bun run index.js --config jon.cfg --counts`: run a count report using a local config file.
 - `bun run index.js mail.example.com password --user user@example.com --folders`: list folders against a specific server.
+- `bun run index.js mail.example.com password --user user@example.com --restore "./backup/Sent Items" --restore-folder "Sent Items - Manager" --dry-run`: preview restoring backed-up `.eml` files into a destination folder.
 - `bun run start`: run the `start` script, equivalent to `bun run index.js`.
 
 There is no separate build step; this project runs directly with Bun.
@@ -24,7 +25,7 @@ Preserve the current single-file style unless a change creates enough complexity
 
 ## Testing Guidelines
 
-No automated test framework is currently configured. For changes, at minimum run `bun run index.js --help` and one non-destructive report command such as `--folders`, `--counts`, or `--list` against a test mailbox. When adding tests later, prefer Bun’s built-in test runner and name files `*.test.js`.
+No automated test framework is currently configured. For changes, at minimum run `bun run index.js --help` and one non-destructive report command such as `--folders`, `--counts`, `--list`, or a restore `--dry-run` against a test mailbox. When adding tests later, prefer Bun’s built-in test runner and name files `*.test.js`.
 
 ## Commit & Pull Request Guidelines
 

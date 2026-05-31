@@ -11,6 +11,8 @@ bun run index.js mail.example.com password --user user@example.com --search "Fit
 bun run index.js mail.example.com password --user user@example.com --search "Fitness" --list --date 20260501-
 bun run index.js mail.example.com password --user user@example.com --list "INBOX.Sent"
 bun run index.js mail.example.com password --user user@example.com --output ./backup
+bun run index.js mail.example.com password --user user@example.com --restore "./backup/Sent Items" --restore-folder "Sent Items - Manager" --dry-run
+bun run index.js mail.example.com password --user user@example.com --restore "./backup/Sent Items" --restore-folder "Sent Items - Manager"
 bun run index.js --counts
 bun run index.js --config jon.cfg --counts
 ```
@@ -29,8 +31,21 @@ Arguments:
 - `--list [folder]`, `-l [folder]`: list message UID plus the raw `Date`, `From`, and `Subject` headers for matched folders. With `--search`, the search text selects folders. Without `--search`, an optional folder argument is matched exactly; omitting it scans all folders. Folder headings are printed only when that folder has matching messages. The `Date` header includes date, time, and timezone when the message provides them.
 - `--date <range>`, `-d <range>`: filter `--list` rows by message `Date` header. Use `YYYYMMDD` for that date or later, `YYYYMMDD-YYYYMMDD` for an inclusive start and exclusive end, `YYYYMMDD-` for an open end, or `-YYYYMMDD` for everything before that date.
 - `--output <path>`, `-o <path>`: save all folders and messages under a local directory.
+- `--restore <path>`: restore `.eml` files from one local backup folder.
+- `--restore-folder <name>`: destination IMAP folder for restored messages. Required with `--restore`.
+- `--dry-run`: preview restore actions without creating folders or appending messages.
 
 Backup mode creates a local directory tree matching the IMAP folder hierarchy and writes messages as `.eml` files named by UID. Message bodies are streamed directly from IMAP to the destination `.eml` file, without staging full messages in a temporary local file. Each folder also gets a `.imap-folder.json` metadata file. Re-running the backup skips existing UID files.
+
+Restore mode appends `.eml` files from a single backup folder into the destination account. If the destination folder does not exist, it is created. Restored messages use the message `Date` header as the IMAP internal date when it can be parsed, which helps mail clients sort migrated sent mail correctly. Restore is append-only and does not deduplicate, so run `--dry-run` first and avoid repeating the real restore unless duplicates are acceptable.
+
+To migrate an old sent-mail-only account into an alias folder, first back up the old account's sent folder, then restore that folder into the new account:
+
+```powershell
+bun run index.js old.mail.example.com password --user manager@example.com --search "Sent" --output ./manager-backup
+bun run index.js new.mail.example.com password --user user@example.com --restore "./manager-backup/Sent Items" --restore-folder "Sent Items - Manager" --dry-run
+bun run index.js new.mail.example.com password --user user@example.com --restore "./manager-backup/Sent Items" --restore-folder "Sent Items - Manager"
+```
 
 IMAP command failures are printed as `ERROR` rows in normal output so redirected logs show connection, authentication, folder, and message fetch failures. Backup summary rows always show the folder and message count, and only include `saved`, `skipped`, or `errors` fields when they add useful information. A backup stops at the first failed folder/message so the log does not look complete after an interrupted or refused IMAP operation; rerun the same backup command to resume skipped files.
 
@@ -51,6 +66,9 @@ Example `config.cfg`:
   "port": 993,
   "user": "user@example.com",
   "password": "secret",
-  "counts": true
+  "counts": true,
+  "restore": "./backup/Sent Items",
+  "restoreFolder": "Sent Items - Manager",
+  "dryRun": true
 }
 ```
